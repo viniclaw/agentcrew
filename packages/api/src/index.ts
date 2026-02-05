@@ -24,6 +24,7 @@ const allowedOrigins = [
   'https://nextjs-altumbase.vercel.app',
   'https://nextjs-liart-theta-68.vercel.app',
   'https://nextjs-gd43ne1iu-altumbase.vercel.app',
+  'https://agentcrew-frontend.vercel.app',
   'https://agentcrew.vercel.app',
   'http://localhost:3000',
   'http://localhost:3001'
