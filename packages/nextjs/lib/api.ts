@@ -36,6 +36,8 @@ interface Crew {
 
 interface CrewMember {
   id: string;
+  crewId: string;
+  crew?: Crew;
   agent: Agent;
   role: 'leader' | 'member' | 'contributor';
   stakedAmount: string;
