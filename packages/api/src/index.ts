@@ -19,10 +19,30 @@ app.use(helmet({
   contentSecurityPolicy: NODE_ENV === 'production'
 }));
 
+// CORS configuration
+const allowedOrigins = [
+  'https://nextjs-altumbase.vercel.app',
+  'https://nextjs-liart-theta-68.vercel.app',
+  'https://agentcrew.vercel.app',
+  'http://localhost:3000',
+  'http://localhost:3001'
+];
+
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '*',
-  methods: ['GET', 'POST', 'PATCH', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes(origin) || process.env.NODE_ENV === 'development') {
+      callback(null, true);
+    } else {
+      console.warn(`CORS blocked for origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
 }));
 
 // Rate limiting
