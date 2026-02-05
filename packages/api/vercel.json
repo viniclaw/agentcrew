@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "name": "agentcrew-api",
+  "builds": [
+    {
+      "src": "src/index.ts",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "src/index.ts"
+    }
+  ],
+  "env": {
+    "NODE_ENV": "production",
+    "CREW_TOKEN_ADDRESS": "0x263eB8ac7bc24DD66ac613717a95D81E758A2b07"
+  }
+}

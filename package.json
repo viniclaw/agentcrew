@@ -1,6 +1,21 @@
 {
-  "dependencies": {
-    "clanker-sdk": "^4.2.10",
-    "viem": "^2.45.1"
-  }
+  "name": "agentcrew-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev:api": "cd packages/api && npm run dev",
+    "dev:web": "cd packages/nextjs && npm run dev",
+    "dev": "concurrently \"npm run dev:api\" \"npm run dev:web\"",
+    "build:web": "cd packages/nextjs && npm run build",
+    "build:api": "cd packages/api && npm run build",
+    "deploy:web": "cd packages/nextjs && vercel --prod",
+    "deploy:api": "cd packages/api && vercel --prod",
+    "deploy": "npm run deploy:api && npm run deploy:web"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  },
+  "workspaces": [
+    "packages/*"
+  ]
 }

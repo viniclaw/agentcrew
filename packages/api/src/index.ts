@@ -20,7 +20,7 @@ app.use(helmet({
 }));
 
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || '*',
+  origin: process.env.CORS_ORIGIN || process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '*',
   methods: ['GET', 'POST', 'PATCH', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
@@ -190,16 +190,18 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`
+// Start server (only in development, not on Vercel)
+if (process.env.VERCEL !== '1') {
+  app.listen(PORT, () => {
+    console.log(`
 🦞 AgentCrew API Server
 ━━━━━━━━━━━━━━━━━━━━━━
 Environment: ${NODE_ENV}
 Port: ${PORT}
 Time: ${new Date().toISOString()}
 ━━━━━━━━━━━━━━━━━━━━━━
-  `);
-});
+    `);
+  });
+}
 
 export default app;

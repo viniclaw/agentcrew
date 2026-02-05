@@ -1,0 +1,20 @@
+{
+  "name": "agentcrew",
+  "version": 2,
+  "builds": [
+    {
+      "src": "packages/nextjs/package.json",
+      "use": "@vercel/next"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "packages/nextjs/$1"
+    }
+  ],
+  "env": {
+    "NEXT_PUBLIC_CREW_TOKEN": "0x263eB8ac7bc24DD66ac613717a95D81E758A2b07",
+    "NEXT_PUBLIC_API_URL": "https://api-agentcrew.vercel.app"
+  }
+}
