@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { ConnectWallet } from '@coinbase/onchainkit/wallet';
 import { useAccount, useSignMessage } from 'wagmi';
-import { api, authManager, useCrews, useMyCrews } from '../lib/api';
+import { api, authManager, useCrews, useMyCrews, useTasks } from '../lib/api';
 
 const CREW_TOKEN = '0x263eB8ac7bc24DD66ac613717a95D81E758A2b07';
 
