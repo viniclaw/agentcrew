@@ -161,7 +161,7 @@ class DatabaseManager {
       }));
   }
 
-  addCrewMember(member: Omit<CrewMember, 'agent'>): CrewMember {
+  addCrewMember(member: Omit<CrewMember, 'agent' | 'joinedAt'>): CrewMember {
     const now = new Date().toISOString();
     const newMember: CrewMember = {
       ...member,
