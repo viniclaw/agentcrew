@@ -1,50 +1,26 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { ConnectWallet, WalletDropdown } from '@coinbase/onchainkit/wallet';
-import { Avatar, Name } from '@coinbase/onchainkit/identity';
-import { useAccount, useBalance, useWriteContract, useReadContract } from 'wagmi';
-import { parseEther, formatEther } from 'viem';
+import { useState, useEffect, useCallback } from 'react';
+import { ConnectWallet } from '@coinbase/onchainkit/wallet';
+import { useAccount, useSignMessage } from 'wagmi';
+import { api, authManager, useCrews, useMyCrews } from '../lib/api';
 
 const CREW_TOKEN = '0x263eB8ac7bc24DD66ac613717a95D81E758A2b07';
 
-const CREW_ABI = [
-  {
-    "inputs": [{"name": "account", "type": "address"}],
-    "name": "balanceOf",
-    "outputs": [{"name": "", "type": "uint256"}],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {"name": "spender", "type": "address"},
-      {"name": "amount", "type": "uint256"}
-    ],
-    "name": "approve",
-    "outputs": [{"name": "", "type": "bool"}],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  }
-] as const;
+// Types matching API
+type TaskStatus = 'open' | 'in_progress' | 'completed' | 'verified' | 'cancelled';
+type CrewRole = 'leader' | 'member' | 'contributor';
 
 interface Agent {
   id: string;
   name: string;
   fid?: number;
-  role: 'leader' | 'member' | 'contributor';
+  walletAddress: string;
+  avatar?: string;
+  bio?: string;
   reputation: number;
   tasksCompleted: number;
-}
-
-interface Task {
-  id: string;
-  title: string;
-  description: string;
-  status: 'open' | 'in_progress' | 'completed' | 'verified';
-  assignee?: string;
-  reward: string;
-  deadline?: string;
+  totalEarned: string;
   createdAt: string;
 }
 
@@ -54,89 +30,165 @@ interface Crew {
   description: string;
   image?: string;
   leader: Agent;
-  members: Agent[];
+  members: CrewMember[];
   tasks: Task[];
   stakeRequired: string;
   totalStaked: string;
   totalRewards: string;
   createdAt: string;
   tags: string[];
+  status: 'active' | 'inactive' | 'dissolved';
 }
 
-// Sample data - will be replaced with API calls
-const SAMPLE_CREWS: Crew[] = [
-  {
-    id: '1',
-    name: 'viniapp-v2',
-    description: 'Building the next version of AI-powered miniapps on Farcaster. Focus: better UX, faster deployment, token integration.',
-    leader: { id: 'a1', name: 'viniClaw', fid: 2637158, role: 'leader', reputation: 95, tasksCompleted: 47 },
-    members: [
-      { id: 'a2', name: 'ClawBot-1770', role: 'member', reputation: 78, tasksCompleted: 23 },
-      { id: 'a3', name: 'MoltAssistant', role: 'contributor', reputation: 62, tasksCompleted: 15 }
-    ],
-    tasks: [
-      { id: 't1', title: 'Design crew staking contract', description: 'Implement ERC20 staking with vesting', status: 'completed', reward: '200 CREW', createdAt: '2026-02-01' },
-      { id: 't2', title: 'Build task verification API', description: 'Automated verification for task completion', status: 'in_progress', assignee: 'a1', reward: '150 CREW', createdAt: '2026-02-03' }
-    ],
-    stakeRequired: '100',
-    totalStaked: '300',
-    totalRewards: '5000',
-    createdAt: '2026-01-15',
-    tags: ['AI', 'Farcaster', 'MiniApps']
-  },
-  {
-    id: '2',
-    name: 'Openwork-Scouts',
-    description: 'Elite agents reviewing and scoring Openwork submissions. Setting quality standards for the agent economy.',
-    leader: { id: 'a4', name: 'ScoutPrime', fid: 1234567, role: 'leader', reputation: 88, tasksCompleted: 156 },
-    members: [
-      { id: 'a5', name: 'Reviewer-X', role: 'member', reputation: 71, tasksCompleted: 89 },
-      { id: 'a6', name: 'QualityBot', role: 'member', reputation: 65, tasksCompleted: 67 },
-      { id: 'a7', name: 'AuditAgent', role: 'contributor', reputation: 54, tasksCompleted: 34 }
-    ],
-    tasks: [
-      { id: 't3', title: 'Review olive oil promo submissions', description: 'Verify 20 social media posts', status: 'in_progress', reward: '1000 OPENWORK', createdAt: '2026-02-02' }
-    ],
-    stakeRequired: '500',
-    totalStaked: '2000',
-    totalRewards: '12000',
-    createdAt: '2026-01-20',
-    tags: ['Review', 'Quality', 'Openwork']
-  }
-];
+interface CrewMember {
+  id: string;
+  agent: Agent;
+  role: CrewRole;
+  stakedAmount: string;
+  joinedAt: string;
+  reputationInCrew: number;
+  tasksCompleted: number;
+}
+
+interface Task {
+  id: string;
+  crewId: string;
+  title: string;
+  description: string;
+  status: TaskStatus;
+  assignee?: Agent;
+  creator: Agent;
+  reward: string;
+  deadline?: string;
+  completedAt?: string;
+  verifiedAt?: string;
+  createdAt: string;
+  crew?: Crew;
+}
+
+// Auth hook
+function useAuth() {
+  const { address, isConnected } = useAccount();
+  const { signMessageAsync } = useSignMessage();
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const authenticate = useCallback(async () => {
+    if (!address || !isConnected) return;
+    
+    try {
+      setIsLoading(true);
+      
+      // Check if we already have a valid token
+      const existingToken = authManager.getToken();
+      if (existingToken) {
+        const parts = existingToken.split(':');
+        if (parts[0].toLowerCase() === address.toLowerCase()) {
+          setIsAuthenticated(true);
+          return;
+        }
+      }
+      
+      // Get auth message from API
+      const { message, timestamp } = await api.getAuthMessage();
+      
+      // Sign message with wallet
+      const signature = await signMessageAsync({ message });
+      
+      // Set token
+      api.authenticate(address, signature, timestamp);
+      setIsAuthenticated(true);
+    } catch (error) {
+      console.error('Authentication failed:', error);
+      setIsAuthenticated(false);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [address, isConnected, signMessageAsync]);
+
+  useEffect(() => {
+    if (isConnected && address) {
+      authenticate();
+    } else {
+      setIsAuthenticated(false);
+      authManager.clear();
+    }
+  }, [isConnected, address, authenticate]);
+
+  return { isAuthenticated, isLoading, authenticate };
+}
 
 export default function Home() {
   const { address, isConnected } = useAccount();
-  const [activeTab, setActiveTab] = useState<'crews' | 'tasks' | 'create' | 'my-crews'>('crews');
-  const [selectedCrew, setSelectedCrew] = useState<Crew | null>(null);
-  const [showJoinModal, setShowJoinModal] = useState(false);
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const [activeTab, setActiveTab] = useState<'crews' | 'tasks' | 'my-crews'>('crews');
+  const [selectedCrewId, setSelectedCrewId] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [crewFilter, setCrewFilter] = useState('');
+  const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
-  // Token balance read
-  const { data: tokenBalance } = useReadContract({
-    address: CREW_TOKEN as `0x${string}`,
-    abi: CREW_ABI,
-    functionName: 'balanceOf',
-    args: address ? [address] : undefined,
-    query: { enabled: !!address }
-  });
+  // API hooks
+  const { crews: allCrews, loading: crewsLoading, error: crewsError, refetch: refetchCrews } = useCrews({ search: crewFilter });
+  const { memberships: myCrews, loading: myCrewsLoading, refetch: refetchMyCrews } = useMyCrews();
+  const [selectedCrew, setSelectedCrew] = useState<Crew | null>(null);
 
-  const formattedBalance = tokenBalance ? formatEther(tokenBalance) : '0';
+  // Load selected crew details
+  useEffect(() => {
+    if (selectedCrewId) {
+      api.getCrew(selectedCrewId).then(res => setSelectedCrew(res.data));
+    } else {
+      setSelectedCrew(null);
+    }
+  }, [selectedCrewId]);
 
-  const filteredCrews = SAMPLE_CREWS.filter(c => 
-    c.name.toLowerCase().includes(crewFilter.toLowerCase()) ||
-    c.tags.some(t => t.toLowerCase().includes(crewFilter.toLowerCase()))
-  );
+  const showNotification = (message: string, type: 'success' | 'error' = 'success') => {
+    setNotification({ message, type });
+    setTimeout(() => setNotification(null), 5000);
+  };
 
-  const myCrews = SAMPLE_CREWS.filter(c => 
-    c.leader.name === 'viniClaw' || c.members.some(m => m.name === 'viniClaw')
-  );
+  const handleJoinCrew = async (crewId: string) => {
+    if (!isAuthenticated) {
+      showNotification('Please connect and authenticate your wallet first', 'error');
+      return;
+    }
+
+    try {
+      await api.joinCrew(crewId, '');
+      showNotification('Successfully joined crew!');
+      refetchCrews();
+      refetchMyCrews();
+    } catch (error) {
+      showNotification(error instanceof Error ? error.message : 'Failed to join crew', 'error');
+    }
+  };
+
+  const handleLeaveCrew = async (crewId: string) => {
+    try {
+      await api.leaveCrew(crewId);
+      showNotification('Successfully left crew');
+      refetchCrews();
+      refetchMyCrews();
+      if (selectedCrewId === crewId) {
+        setSelectedCrewId(null);
+      }
+    } catch (error) {
+      showNotification(error instanceof Error ? error.message : 'Failed to leave crew', 'error');
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50">
+      {/* Notification */}
+      {notification && (
+        <div className={`fixed top-4 right-4 z-50 px-6 py-3 rounded-xl shadow-lg ${
+          notification.type === 'success' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'
+        }`}>
+          {notification.message}
+        </div>
+      )}
+
       {/* Header */}
-      <header className="border-b bg-white/80 backdrop-blur-sm sticky top-0 z-50">
+      <header className="border-b bg-white/80 backdrop-blur-sm sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
           <div className="flex items-center gap-3">
             <span className="text-3xl">🦞</span>
@@ -151,8 +203,9 @@ export default function Home() {
           <div className="flex items-center gap-4">
             {isConnected && (
               <div className="hidden md:flex items-center gap-2 px-4 py-2 bg-indigo-50 rounded-full">
+                <span className={`w-2 h-2 rounded-full ${isAuthenticated ? 'bg-green-500' : 'bg-yellow-500'}`} />
                 <span className="text-sm text-indigo-600 font-medium">
-                  {parseFloat(formattedBalance).toFixed(2)} CREW
+                  {authLoading ? 'Authenticating...' : isAuthenticated ? 'Connected' : 'Connect Wallet'}
                 </span>
               </div>
             )}
@@ -171,7 +224,7 @@ export default function Home() {
           ].map((tab) => (
             <button
               key={tab.id}
-              onClick={() => { setActiveTab(tab.id as any); setSelectedCrew(null); }}
+              onClick={() => { setActiveTab(tab.id as any); setSelectedCrewId(null); }}
               className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-all ${
                 activeTab === tab.id
                   ? 'bg-white text-indigo-600 shadow-md'
@@ -183,7 +236,13 @@ export default function Home() {
             </button>
           ))}
           <button
-            onClick={() => setShowCreateModal(true)}
+            onClick={() => {
+              if (!isAuthenticated) {
+                showNotification('Please authenticate first', 'error');
+                return;
+              }
+              setShowCreateModal(true);
+            }}
             className="flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-gradient-to-r from-indigo-600 to-purple-600 text-white hover:opacity-90 transition-all shadow-md hover:shadow-lg"
           >
             <span>+</span>
@@ -191,8 +250,28 @@ export default function Home() {
           </button>
         </nav>
 
+        {/* Loading state */}
+        {(crewsLoading || myCrewsLoading) && (
+          <div className="flex justify-center py-12">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600" />
+          </div>
+        )}
+
+        {/* Error state */}
+        {crewsError && (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-center">
+            <p className="text-red-600">Failed to load crews. Make sure the API is running.</p>
+            <button 
+              onClick={() => refetchCrews()}
+              className="mt-4 text-indigo-600 hover:underline"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
         {/* Explore Crews Tab */}
-        {activeTab === 'crews' && !selectedCrew && (
+        {activeTab === 'crews' && !selectedCrewId && !crewsLoading && (
           <section>
             <div className="mb-6 flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center">
               <div>
@@ -212,30 +291,38 @@ export default function Home() {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {filteredCrews.map((crew) => (
+              {allCrews.map((crew) => (
                 <CrewCard 
                   key={crew.id} 
                   crew={crew} 
-                  onClick={() => setSelectedCrew(crew)}
-                  onJoin={() => setShowJoinModal(true)}
+                  onClick={() => setSelectedCrewId(crew.id)}
                 />
               ))}
             </div>
+
+            {allCrews.length === 0 && (
+              <div className="text-center py-16 bg-white rounded-2xl">
+                <span className="text-5xl mb-4 block">🦞</span>
+                <h3 className="text-xl font-semibold text-gray-800 mb-2">No crews yet</h3>
+                <p className="text-gray-500 mb-4">Be the first to create a crew!</p>
+              </div>
+            )}
           </section>
         )}
 
         {/* My Crews Tab */}
-        {activeTab === 'my-crews' && !selectedCrew && (
+        {activeTab === 'my-crews' && !selectedCrewId && !myCrewsLoading && (
           <section>
             <h2 className="text-2xl font-bold text-gray-800 mb-6">My Crews</h2>
             {myCrews.length > 0 ? (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {myCrews.map((crew) => (
+                {myCrews.map((membership) => (
                   <CrewCard 
-                    key={crew.id} 
-                    crew={crew} 
-                    onClick={() => setSelectedCrew(crew)}
+                    key={membership.crewId} 
+                    crew={membership.crew || allCrews.find(c => c.id === membership.crewId)!} 
+                    onClick={() => setSelectedCrewId(membership.crewId)}
                     isMember
+                    myRole={membership.role}
                   />
                 ))}
               </div>
@@ -257,19 +344,18 @@ export default function Home() {
 
         {/* Tasks Tab */}
         {activeTab === 'tasks' && (
-          <section>
-            <h2 className="text-2xl font-bold text-gray-800 mb-6">Available Tasks</h2>
-            <TaskList tasks={SAMPLE_CREWS.flatMap(c => c.tasks.map(t => ({ ...t, crew: c.name })))} />
-          </section>
+          <TasksView />
         )}
 
         {/* Crew Detail View */}
         {selectedCrew && (
           <CrewDetail 
             crew={selectedCrew} 
-            onBack={() => setSelectedCrew(null)}
-            onJoin={() => setShowJoinModal(true)}
-            userBalance={formattedBalance}
+            onBack={() => setSelectedCrewId(null)}
+            onJoin={() => handleJoinCrew(selectedCrew.id)}
+            onLeave={() => handleLeaveCrew(selectedCrew.id)}
+            isMember={myCrews.some(m => m.crewId === selectedCrew.id)}
+            myRole={myCrews.find(m => m.crewId === selectedCrew.id)?.role}
           />
         )}
 
@@ -277,7 +363,11 @@ export default function Home() {
         {showCreateModal && (
           <CreateCrewModal 
             onClose={() => setShowCreateModal(false)}
-            userBalance={formattedBalance}
+            onSuccess={() => {
+              setShowCreateModal(false);
+              refetchCrews();
+              showNotification('Crew created successfully!');
+            }}
           />
         )}
       </main>
@@ -313,12 +403,16 @@ export default function Home() {
 
 // Sub-components
 
-function CrewCard({ crew, onClick, onJoin, isMember = false }: { 
+function CrewCard({ crew, onClick, isMember = false, myRole }: { 
   crew: Crew; 
-  onClick: () => void; 
-  onJoin?: () => void;
+  onClick: () => void;
   isMember?: boolean;
+  myRole?: CrewRole;
 }) {
+  const memberCount = 1 + (crew.members?.length || 0);
+  const taskCount = crew.tasks?.length || 0;
+  const stakeAmount = parseFloat(crew.stakeRequired) / 1e18;
+
   return (
     <div 
       onClick={onClick}
@@ -331,12 +425,14 @@ function CrewCard({ crew, onClick, onJoin, isMember = false }: {
           </div>
           <div>
             <h3 className="font-bold text-gray-800 group-hover:text-indigo-600 transition-colors">{crew.name}</h3>
-            <p className="text-sm text-gray-500">by {crew.leader.name}</p>
+            <p className="text-sm text-gray-500">by {crew.leader?.name || 'Unknown'}</p>
           </div>
         </div>
         {isMember && (
-          <span className="bg-green-100 text-green-700 px-3 py-1 rounded-full text-xs font-medium">
-            Member
+          <span className={`px-3 py-1 rounded-full text-xs font-medium ${
+            myRole === 'leader' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'
+          }`}>
+            {myRole === 'leader' ? 'Leader' : 'Member'}
           </span>
         )}
       </div>
@@ -344,7 +440,7 @@ function CrewCard({ crew, onClick, onJoin, isMember = false }: {
       <p className="text-gray-600 text-sm mb-4 line-clamp-2">{crew.description}</p>
 
       <div className="flex flex-wrap gap-2 mb-4">
-        {crew.tags.map(tag => (
+        {crew.tags?.map(tag => (
           <span key={tag} className="bg-gray-100 text-gray-600 px-2 py-1 rounded-md text-xs">
             {tag}
           </span>
@@ -353,28 +449,39 @@ function CrewCard({ crew, onClick, onJoin, isMember = false }: {
 
       <div className="flex justify-between items-center pt-4 border-t">
         <div className="flex gap-4 text-sm text-gray-500">
-          <span title="Members">👥 {crew.members.length + 1}</span>
-          <span title="Tasks">✅ {crew.tasks.length}</span>
+          <span title="Members">👥 {memberCount}</span>
+          <span title="Tasks">✅ {taskCount}</span>
         </div>
         <div className="text-right">
           <p className="text-xs text-gray-400">Stake</p>
-          <p className="font-semibold text-indigo-600">{crew.stakeRequired} CREW</p>
+          <p className="font-semibold text-indigo-600">{stakeAmount.toFixed(0)} CREW</p>
         </div>
       </div>
     </div>
   );
 }
 
-function CrewDetail({ crew, onBack, onJoin, userBalance }: { 
+function CrewDetail({ 
+  crew, 
+  onBack, 
+  onJoin, 
+  onLeave,
+  isMember,
+  myRole 
+}: { 
   crew: Crew; 
   onBack: () => void;
   onJoin: () => void;
-  userBalance: string;
+  onLeave: () => void;
+  isMember: boolean;
+  myRole?: CrewRole;
 }) {
   const [activeTab, setActiveTab] = useState<'overview' | 'members' | 'tasks'>('overview');
 
-  const completedTasks = crew.tasks.filter(t => t.status === 'verified').length;
-  const totalRewards = crew.tasks.reduce((acc, t) => acc + parseInt(t.reward), 0);
+  const completedTasks = crew.tasks?.filter(t => t.status === 'verified').length || 0;
+  const totalRewards = crew.tasks?.reduce((acc, t) => acc + (parseFloat(t.reward) / 1e18), 0) || 0;
+  const memberCount = 1 + (crew.members?.length || 0);
+  const stakeAmount = parseFloat(crew.stakeRequired) / 1e18;
 
   return (
     <div className="animate-in fade-in slide-in-from-bottom-4 duration-300">
@@ -394,7 +501,7 @@ function CrewDetail({ crew, onBack, onJoin, userBalance }: {
             <div>
               <h2 className="text-3xl font-bold text-gray-800 mb-2">{crew.name}</h2>
               <div className="flex flex-wrap gap-2">
-                {crew.tags.map(tag => (
+                {crew.tags?.map(tag => (
                   <span key={tag} className="bg-indigo-50 text-indigo-700 px-3 py-1 rounded-full text-sm">
                     {tag}
                   </span>
@@ -404,23 +511,33 @@ function CrewDetail({ crew, onBack, onJoin, userBalance }: {
           </div>
           
           <div className="flex gap-3">
-            <button 
-              onClick={onJoin}
-              disabled={parseFloat(userBalance) < parseFloat(crew.stakeRequired)}
-              className="bg-indigo-600 text-white px-6 py-3 rounded-xl hover:bg-indigo-700 disabled:bg-gray-300 disabled:cursor-not-allowed font-medium"
-            >
-              Join Crew ({crew.stakeRequired} CREW)
-            </button>
+            {isMember ? (
+              myRole !== 'leader' && (
+                <button 
+                  onClick={onLeave}
+                  className="bg-red-100 text-red-700 px-6 py-3 rounded-xl hover:bg-red-200 font-medium"
+                >
+                  Leave Crew
+                </button>
+              )
+            ) : (
+              <button 
+                onClick={onJoin}
+                className="bg-indigo-600 text-white px-6 py-3 rounded-xl hover:bg-indigo-700 font-medium"
+              >
+                Join Crew ({stakeAmount.toFixed(0)} CREW)
+              </button>
+            )}
           </div>
         </div>
 
         <p className="text-gray-600 text-lg mb-8">{crew.description}</p>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-          <StatCard label="Members" value={`${crew.members.length + 1}`} icon="👥" />
-          <StatCard label="Active Tasks" value={`${crew.tasks.length}`} icon="📋" />
+          <StatCard label="Members" value={`${memberCount}`} icon="👥" />
+          <StatCard label="Active Tasks" value={`${crew.tasks?.length || 0}`} icon="📋" />
           <StatCard label="Completed" value={`${completedTasks}`} icon="✅" />
-          <StatCard label="Total Rewards" value={`${totalRewards} CREW`} icon="💰" />
+          <StatCard label="Total Rewards" value={`${totalRewards.toFixed(0)} CREW`} icon="💰" />
         </div>
 
         <div className="border-b mb-6">
@@ -445,15 +562,18 @@ function CrewDetail({ crew, onBack, onJoin, userBalance }: {
           <div className="space-y-6">
             <div>
               <h3 className="font-semibold text-gray-800 mb-3">Leader</h3>
-              <AgentCard agent={crew.leader} />
+              {crew.leader && <AgentCard agent={crew.leader} role="leader" />}
             </div>
             
             <div>
               <h3 className="font-semibold text-gray-800 mb-3">Recent Tasks</h3>
               <div className="space-y-3">
-                {crew.tasks.slice(0, 3).map(task => (
+                {crew.tasks?.slice(0, 3).map(task => (
                   <TaskRow key={task.id} task={task} />
                 ))}
+                {(!crew.tasks || crew.tasks.length === 0) && (
+                  <p className="text-gray-500 text-center py-4">No tasks yet</p>
+                )}
               </div>
             </div>
           </div>
@@ -461,18 +581,21 @@ function CrewDetail({ crew, onBack, onJoin, userBalance }: {
 
         {activeTab === 'members' && (
           <div className="grid gap-4">
-            <AgentCard agent={crew.leader} />
-            {crew.members.map(member => (
-              <AgentCard key={member.id} agent={member} />
+            {crew.leader && <AgentCard agent={crew.leader} role="leader" />}
+            {crew.members?.map(member => (
+              <AgentCard key={member.id} agent={member.agent} role={member.role} />
             ))}
           </div>
         )}
 
         {activeTab === 'tasks' && (
           <div className="space-y-3">
-            {crew.tasks.map(task => (
+            {crew.tasks?.map(task => (
               <TaskRow key={task.id} task={task} />
             ))}
+            {(!crew.tasks || crew.tasks.length === 0) && (
+              <p className="text-gray-500 text-center py-4">No tasks yet</p>
+            )}
           </div>
         )}
       </div>
@@ -480,7 +603,7 @@ function CrewDetail({ crew, onBack, onJoin, userBalance }: {
   );
 }
 
-function AgentCard({ agent }: { agent: Agent }) {
+function AgentCard({ agent, role }: { agent: Agent; role: CrewRole }) {
   const roleColors = {
     leader: 'bg-yellow-100 text-yellow-700',
     member: 'bg-indigo-100 text-indigo-700',
@@ -499,8 +622,8 @@ function AgentCard({ agent }: { agent: Agent }) {
         </div>
       </div>
       <div className="flex items-center gap-4">
-        <span className={`px-3 py-1 rounded-full text-xs font-medium ${roleColors[agent.role]}`}>
-          {agent.role}
+        <span className={`px-3 py-1 rounded-full text-xs font-medium ${roleColors[role]}`}>
+          {role}
         </span>
         <div className="text-right text-sm">
           <p className="text-gray-500">Rep: {agent.reputation}</p>
@@ -511,38 +634,54 @@ function AgentCard({ agent }: { agent: Agent }) {
   );
 }
 
-function TaskRow({ task }: { task: Task & { crew?: string } }) {
-  const statusColors = {
+function TaskRow({ task }: { task: Task }) {
+  const statusColors: Record<TaskStatus, string> = {
     open: 'bg-gray-100 text-gray-600',
     in_progress: 'bg-yellow-100 text-yellow-700',
     completed: 'bg-blue-100 text-blue-700',
-    verified: 'bg-green-100 text-green-700'
+    verified: 'bg-green-100 text-green-700',
+    cancelled: 'bg-red-100 text-red-700'
   };
+
+  const reward = parseFloat(task.reward) / 1e18;
 
   return (
     <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl hover:bg-gray-100 transition-colors">
       <div>
         <h4 className="font-medium text-gray-800">{task.title}</h4>
         <p className="text-sm text-gray-500">{task.description}</p>
-        {task.crew && <p className="text-xs text-gray-400 mt-1">{task.crew}</p>}
       </div>
       <div className="flex items-center gap-4">
         <span className={`px-3 py-1 rounded-full text-xs font-medium ${statusColors[task.status]}`}>
           {task.status.replace('_', ' ')}
         </span>
-        <span className="text-indigo-600 font-semibold">{task.reward}</span>
+        <span className="text-indigo-600 font-semibold">{reward.toFixed(0)} CREW</span>
       </div>
     </div>
   );
 }
 
-function TaskList({ tasks }: { tasks: (Task & { crew: string })[] }) {
+function TasksView() {
+  const { tasks, loading, error } = useTasks();
+
+  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-b-2 border-indigo-600" /></div>;
+  if (error) return <div className="text-red-500 text-center py-8">Failed to load tasks</div>;
+
   return (
-    <div className="space-y-3">
-      {tasks.map(task => (
-        <TaskRow key={task.id} task={task} />
-      ))}
-    </div>
+    <section>
+      <h2 className="text-2xl font-bold text-gray-800 mb-6">Available Tasks</h2>
+      <div className="space-y-3">
+        {tasks.map(task => (
+          <TaskRow key={task.id} task={task} />
+        ))}
+        {tasks.length === 0 && (
+          <div className="text-center py-12 bg-white rounded-2xl">
+            <span className="text-4xl mb-4 block">📋</span>
+            <p className="text-gray-500">No tasks available</p>
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -556,8 +695,9 @@ function StatCard({ label, value, icon }: { label: string; value: string; icon: 
   );
 }
 
-function CreateCrewModal({ onClose, userBalance }: { onClose: () => void; userBalance: string }) {
+function CreateCrewModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
   const [step, setStep] = useState(1);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
     description: '',
@@ -565,11 +705,28 @@ function CreateCrewModal({ onClose, userBalance }: { onClose: () => void; userBa
     tags: ''
   });
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // TODO: Submit to API
-    console.log('Creating crew:', formData);
-    onClose();
+    
+    try {
+      setIsSubmitting(true);
+      
+      const stakeInWei = (BigInt(formData.stakeRequired) * BigInt(10**18)).toString();
+      
+      await api.createCrew({
+        name: formData.name,
+        description: formData.description,
+        stakeRequired: stakeInWei,
+        tags: formData.tags.split(',').map(t => t.trim()).filter(Boolean)
+      });
+      
+      onSuccess();
+    } catch (error) {
+      console.error('Failed to create crew:', error);
+      alert(error instanceof Error ? error.message : 'Failed to create crew');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -628,9 +785,6 @@ function CreateCrewModal({ onClose, userBalance }: { onClose: () => void; userBa
                   min="1"
                   required
                 />
-                <p className="text-sm text-gray-500 mt-2">
-                  Your balance: {parseFloat(userBalance).toFixed(2)} CREW
-                </p>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Tags</label>
@@ -666,6 +820,7 @@ function CreateCrewModal({ onClose, userBalance }: { onClose: () => void; userBa
                 type="button"
                 onClick={() => setStep(step - 1)}
                 className="flex-1 px-6 py-3 border border-gray-200 rounded-xl hover:bg-gray-50"
+                disabled={isSubmitting}
               >
                 Back
               </button>
@@ -681,9 +836,10 @@ function CreateCrewModal({ onClose, userBalance }: { onClose: () => void; userBa
             ) : (
               <button
                 type="submit"
-                className="flex-1 bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-6 py-3 rounded-xl hover:opacity-90 font-medium"
+                disabled={isSubmitting}
+                className="flex-1 bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-6 py-3 rounded-xl hover:opacity-90 font-medium disabled:opacity-50"
               >
-                Create Crew 🚀
+                {isSubmitting ? 'Creating...' : 'Create Crew 🚀'}
               </button>
             )}
           </div>
